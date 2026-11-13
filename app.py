@@ -10,6 +10,7 @@ from supabase import create_client
 
 
 st.set_page_config(page_title="소수 찾기", page_icon="🔢")
+
 CLASSES = [f"1학년 {number}반" for number in range(1, 6)]
 
 
@@ -45,14 +46,19 @@ def load_roster(db, classroom):
 
 @st.fragment(run_every="3s")
 def show_results(db, code):
-    attempts = (
-        db.table("prime_attempts")
-        .select("student,correct")
-        .eq("code", code)
-        .order("id")
-        .execute()
-        .data
-    )
+    try:
+        attempts = (
+            db.table("prime_attempts")
+            .select("student,correct")
+            .eq("code", code)
+            .order("id")
+            .execute()
+            .data
+        )
+    except APIError:
+        st.error("순위를 불러오지 못했어요. 잠시 후 자동으로 다시 확인해요.")
+        return
+
     ranked = [row["student"] for row in attempts if row["correct"]]
     st.caption(f"전체 제출 {len(attempts)}명 / 모두 정답 {len(ranked)}명")
 
@@ -87,7 +93,7 @@ def teacher_page(db, password):
 
     with st.form(f"roster_{classroom}"):
         roster_text = st.text_area(
-            "한 줄에 한 명씩 붙여넣으세요. 같은 반의 동명이인은 번호와 이름을 함께 등록하세요.",
+            "한 줄에 한 명씩 입력하세요. 같은 반의 동명이인은 번호와 이름을 함께 등록하세요.",
             value="\n".join(load_roster(db, classroom)),
             height=210,
             key=f"roster_text_{classroom}",
@@ -99,6 +105,7 @@ def teacher_page(db, password):
             name for line in roster_text.splitlines()
             if (name := normalize(line))
         ]
+
         if not names or len(names) > 100 or any(len(name) > 40 for name in names):
             st.error("1~100명까지 등록할 수 있어요. 각 이름은 40자 이내로 입력해 주세요.")
         elif len(set(names)) != len(names):
@@ -128,12 +135,16 @@ def teacher_page(db, password):
                 "answer": answer,
             }).execute()
             st.session_state[results_key] = code
+            st.success(f"{classroom} 수업을 열었어요. 학생은 이름만 입력하면 돼요.")
+
+    st.caption("학생은 가장 최근에 연 수업으로 입장해요. 순위 조회에서 과거 수업을 선택해도 입장 대상은 바뀌지 않아요.")
 
     rounds = (
         db.table("prime_rounds")
         .select("code")
         .eq("classroom", classroom)
         .order("created_at", desc=True)
+        .order("code", desc=True)
         .limit(50)
         .execute()
         .data
@@ -141,12 +152,10 @@ def teacher_page(db, password):
 
     if rounds:
         code = st.selectbox(
-            "순위를 볼 수업 코드",
+            "순위를 볼 수업",
             [row["code"] for row in rounds],
             key=results_key,
         )
-        st.code(code)
-        st.caption("학생에게 앱 주소와 수업 코드를 알려 주세요. 새 수업에는 개설 시점의 명단이 적용돼요.")
         show_results(db, code)
 
 
@@ -158,7 +167,7 @@ def show_outcome(result):
     elif status == "wrong":
         st.error("오답이 포함되어 순위에서 제외됐어요. 제출 기회를 사용했어요.")
     elif status == "denied":
-        st.error("수업 코드와 등록된 이름을 확인해 주세요.")
+        st.error("수업 명단에 등록된 이름을 확인해 주세요.")
     else:
         st.error("숫자판에서 서로 다른 숫자 9개를 선택해 주세요.")
 
@@ -168,36 +177,43 @@ def student_page(db):
 
     if not entry:
         with st.form("join"):
-            code = st.text_input("수업 코드", max_chars=8).strip().upper()
-            name = normalize(st.text_input("등록된 이름", max_chars=40))
+            name = normalize(st.text_input("이름", max_chars=40))
             join = st.form_submit_button("입장", type="primary")
 
         if not join:
             return
 
-        if not code or not name:
-            st.error("수업 코드와 이름을 모두 입력해 주세요.")
+        if not name:
+            st.error("이름을 입력해 주세요.")
             return
 
-        rows = (
+        rounds = (
             db.table("prime_rounds")
-            .select("classroom,names,board")
-            .eq("code", code)
+            .select("code,classroom,names,board")
+            .order("created_at", desc=True)
+            .order("code", desc=True)
+            .limit(1)
             .execute()
             .data
         )
 
-        if not rows or name not in rows[0]["names"]:
-            st.error("수업 코드와 등록된 이름을 확인해 주세요.")
+        if not rounds:
+            st.info("선생님이 수업을 열면 입장할 수 있어요.")
             return
 
-        game = rows[0]
-        st.session_state.entry = (code, name, game["classroom"], game["board"])
+        game = rounds[0]
+        if name not in game["names"]:
+            st.error("지금 열린 수업의 명단에 없는 이름이에요.")
+            return
+
+        st.session_state.entry = (
+            game["code"], name, game["classroom"], game["board"]
+        )
         st.rerun()
 
     code, name, classroom, board = entry
     confirmation_key = f"confirm_{code}_{name}"
-    st.caption(f"{classroom} / {name} / 수업 코드 {code}")
+    st.caption(f"{classroom} / {name}")
 
     if st.button("입장 화면으로"):
         for key in ("entry", "outcome", "picks", confirmation_key):
@@ -234,7 +250,7 @@ def student_page(db):
             show_outcome({"status": "wrong"})
         return
 
-    st.write("홀수 25개에서 소수 9개를 고르세요. 제출은 한 번이며, 하나라도 틀리면 순위에서 제외돼요.")
+    st.write("홀수 25개에서 소수 9개를 고르세요. 한 번만 제출할 수 있고, 하나라도 틀리면 순위에서 제외돼요.")
 
     if "picks" not in st.session_state:
         st.session_state.picks = set()
@@ -242,11 +258,12 @@ def student_page(db):
     picks = st.session_state.picks
 
     for start in range(0, len(board), 5):
-        for column, number in zip(st.columns(5), board[start:start + 5]):
+        columns = st.columns(5)
+        for column, number in zip(columns, board[start:start + 5]):
             selected = number in picks
             clicked = column.button(
                 str(number),
-                key=f"tile_{number}",
+                key=f"tile_{code}_{number}",
                 width="stretch",
                 type="primary" if selected else "secondary",
                 disabled=len(picks) == 9 and not selected,
@@ -288,18 +305,21 @@ mode = st.sidebar.radio("화면 선택", ["학생", "교사"])
 
 try:
     config = st.secrets.get("app")
+    if config is None:
+        config = st.secrets
 except FileNotFoundError:
     st.error("Streamlit Cloud에서 이 앱에 저장된 Secrets를 찾지 못했어요.")
     st.stop()
 
-if config is None or not hasattr(config, "get"):
-    st.error("Secrets에서 [app] 섹션을 읽지 못했어요.")
+if not hasattr(config, "get"):
+    st.error("Secrets에서 app이 섹션으로 설정되어 있는지 확인해 주세요.")
     st.stop()
 
 fields = ("supabase_url", "supabase_service_role_key", "teacher_password")
+values = {field: config.get(field) for field in fields}
 invalid = [
-    field for field in fields
-    if not isinstance(config.get(field), str) or not config.get(field).strip()
+    field for field, value in values.items()
+    if not isinstance(value, str) or not value.strip()
 ]
 
 if invalid:
@@ -308,8 +328,8 @@ if invalid:
 
 try:
     database = connect(
-        config["supabase_url"].strip(),
-        config["supabase_service_role_key"].strip(),
+        values["supabase_url"].strip(),
+        values["supabase_service_role_key"].strip(),
     )
 except (ValueError, TypeError):
     st.error("Supabase URL과 키의 형식을 확인해 주세요.")
@@ -317,7 +337,7 @@ except (ValueError, TypeError):
 
 try:
     if mode == "교사":
-        teacher_page(database, config["teacher_password"])
+        teacher_page(database, values["teacher_password"])
     else:
         student_page(database)
 except APIError:
