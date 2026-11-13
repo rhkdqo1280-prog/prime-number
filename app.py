@@ -209,4 +209,17 @@ try:
 except (KeyError, FileNotFoundError):
     st.error("Streamlit의 Secrets에 [app] 설정을 입력해 주세요.")
 except APIError:
-    st.error("데이터베이스 요청에 실패했어요. 잠시 후 다시 시도하거나 Supabase 설정을 확인해 주세요.")
+    st.error("데이터베이스 요청에 실패했어요. 잠시 후 다시 시도하거나 Supabase 설정을 확인해 주세요.")except KeyError as exc:
+    expected = {
+        "app",
+        "supabase_url",
+        "supabase_service_role_key",
+        "teacher_password",
+    }
+    missing = exc.args[0] if exc.args else None
+    if isinstance(missing, str) and missing in expected:
+        st.error(f"Secrets에서 읽지 못한 항목: {missing}")
+    else:
+        st.error("설정 확인 중 다른 항목에서 오류가 발생했어요.")
+except FileNotFoundError:
+    st.error("이 앱에서 Streamlit Secrets를 읽을 수 없어요.")
