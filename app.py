@@ -340,5 +340,5 @@ try:
         teacher_page(database, values["teacher_password"])
     else:
         student_page(database)
-except APIError:
-    st.error("데이터베이스 요청에 실패했어요. Supabase 설정을 확인해 주세요.")
+except APIError as exc:
+    st.error(f"Supabase 오류 코드 — {exc.code or '없음'}")
