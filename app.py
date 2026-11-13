@@ -2,7 +2,7 @@ import hmac
 import random
 import secrets
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from math import isqrt
 
 import streamlit as st
@@ -14,11 +14,106 @@ from supabase import create_client
 st.set_page_config(page_title="소수 찾기", page_icon="🔢")
 
 CLASSES = [f"1학년 {number}반" for number in range(1, 6)]
-KOREA_TIME = timezone.utc
-# 한국 표준시 UTC+09:00
-from datetime import timedelta
-
 KOREA_TIME = timezone(timedelta(hours=9))
+DATABASE_ERRORS = (APIError, RequestError)
+
+
+def apply_style():
+    st.markdown(
+        """
+        <style>
+        .stApp {
+            background: radial-gradient(
+                ellipse at 50% 0%, #1a304b 0%, #101c30 44%, #0b1322 85%
+            );
+            color: #eef4ff;
+        }
+        [data-testid="stHeader"] { background: transparent; }
+        [data-testid="stSidebar"] { background: #101c30; }
+        .block-container { max-width: 820px; padding-top: 3rem; }
+        .stApp h1, .stApp h2, .stApp h3, .stApp label, .stApp p {
+            color: #eef4ff;
+        }
+        .prime-hero {
+            margin-bottom: 1.35rem;
+            padding: clamp(1.35rem, 5vw, 2.4rem);
+            border: 1px solid #38536f;
+            border-radius: 1.25rem;
+            background: linear-gradient(135deg, #203a52, #142237);
+        }
+        .prime-hero h1 {
+            padding: 0;
+            margin: 0 0 .5rem;
+            font-size: clamp(2.1rem, 8vw, 3.4rem);
+            letter-spacing: -.055em;
+        }
+        .prime-hero p { margin: 0; color: #c4d4e8; }
+        .prime-ready {
+            margin: .65rem 0 1rem;
+            padding: 1.3rem;
+            border: 1px solid #38536f;
+            border-radius: 1rem;
+            background: #172840;
+        }
+        .prime-ready h2 { margin: 0 0 .4rem; padding: 0; }
+        .prime-ready p { margin: 0; color: #c4d4e8; }
+        [data-testid="stMetric"] {
+            padding: .75rem 1rem;
+            border: 1px solid #38536f;
+            border-radius: .9rem;
+            background: #172840;
+        }
+        [data-testid="stMetricValue"] {
+            color: #81efd5;
+            font-variant-numeric: tabular-nums;
+        }
+        .stButton button, .stFormSubmitButton button {
+            min-height: 2.85rem;
+            border-radius: .7rem;
+            font-weight: 700;
+        }
+        button[kind="primary"], button[kind="primaryFormSubmit"] {
+            background: #81efd5;
+            border-color: #81efd5;
+            color: #102721;
+        }
+        button[kind="primary"] p, button[kind="primaryFormSubmit"] p {
+            color: #102721;
+        }
+        button[kind="secondary"] {
+            background: #1a2e49;
+            border-color: #496581;
+            color: #eef4ff;
+        }
+        .stButton button:focus-visible, .stFormSubmitButton button:focus-visible {
+            outline: 2px solid #81efd5;
+            outline-offset: 2px;
+        }
+        .st-key-prime_board [data-testid="stHorizontalBlock"] {
+            flex-wrap: nowrap;
+            gap: .35rem;
+        }
+        .st-key-prime_board [data-testid="stColumn"] {
+            flex: 1 1 0 !important;
+            min-width: 0 !important;
+            width: 0 !important;
+        }
+        .st-key-prime_board button {
+            padding: .2rem;
+            min-height: clamp(2.7rem, 9vw, 4rem);
+        }
+        .st-key-prime_board button p {
+            font-size: clamp(1rem, 4vw, 1.4rem);
+            font-variant-numeric: tabular-nums;
+        }
+        </style>
+        <div class="prime-hero">
+            <h1>소수 찾기</h1>
+            <p>홀수 25개 중 숨어 있는 소수 9개를 찾아보세요.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 @st.cache_resource
@@ -81,8 +176,20 @@ def load_roster(db, classroom):
     return rows[0]["names"] if rows else []
 
 
+def active_lesson(db):
+    rows = (
+        db.table("prime_rounds")
+        .select("code,classroom,names")
+        .eq("accepting_entries", True)
+        .limit(1)
+        .execute()
+        .data
+    )
+    return rows[0] if rows else None
+
+
 @st.fragment(run_every="3s")
-def show_results(db, code):
+def show_ranking(db, code, teacher=False):
     try:
         attempts = (
             db.table("prime_attempts")
@@ -99,33 +206,36 @@ def show_results(db, code):
             .execute()
             .data
         )
-    except (APIError, RequestError) as error:
+    except DATABASE_ERRORS as error:
         database_error(error)
         return
 
-    joined_at_by_student = {
-        entry["student"]: entry["joined_at"] for entry in entries
-    }
-
+    started_by_name = {entry["student"]: entry["joined_at"] for entry in entries}
     ranked = []
+
     for attempt in attempts:
         if not attempt["correct"]:
             continue
 
         name = attempt["student"]
-        joined_at = joined_at_by_student.get(name)
+        started_at = started_by_name.get(name)
         submitted_at = attempt["submitted_at"]
-        ranked.append({
-            "순위": len(ranked) + 1,
-            "이름": name,
-            "입장 시각": clock_text(joined_at),
-            "제출 시각": clock_text(submitted_at),
-            "풀이 시간": elapsed_text(joined_at, submitted_at),
-        })
+        row = {"순위": len(ranked) + 1, "이름": name}
 
-    st.caption(
-        f"입장 {len(entries)}명 / 제출 {len(attempts)}명 / 모두 정답 {len(ranked)}명"
-    )
+        if teacher:
+            row["시작 시각"] = clock_text(started_at)
+            row["제출 시각"] = clock_text(submitted_at)
+
+        row["풀이 시간"] = elapsed_text(started_at, submitted_at)
+        ranked.append(row)
+
+    if teacher:
+        st.caption(
+            f"시작 {len(entries)}명 / 제출 {len(attempts)}명 / 모두 정답 {len(ranked)}명"
+        )
+    else:
+        st.subheader("우리 반 순위")
+        st.caption("소수 9개를 모두 맞힌 학생을 제출 순서대로 보여줘요.")
 
     if ranked:
         st.dataframe(ranked, hide_index=True, width="stretch")
@@ -137,7 +247,7 @@ def teacher_page(db, password):
     if not st.session_state.get("teacher"):
         with st.form("teacher_login"):
             entered = st.text_input("교사 비밀번호", type="password")
-            login = st.form_submit_button("로그인")
+            login = st.form_submit_button("로그인", type="primary")
 
         if login:
             if hmac.compare_digest(entered.encode(), password.encode()):
@@ -150,7 +260,8 @@ def teacher_page(db, password):
         st.session_state.teacher = False
         st.rerun()
 
-    if notice := st.session_state.pop("teacher_notice", None):
+    notice = st.session_state.pop("teacher_notice", None)
+    if notice:
         st.success(notice)
 
     classroom = st.selectbox("반 선택", CLASSES)
@@ -200,16 +311,9 @@ def teacher_page(db, password):
         else:
             st.warning("먼저 이 반의 명단을 저장해 주세요.")
 
-    active = (
-        db.table("prime_rounds")
-        .select("classroom")
-        .eq("accepting_entries", True)
-        .limit(1)
-        .execute()
-        .data
-    )
+    active = active_lesson(db)
     if active:
-        st.caption(f"현재 입장 가능한 수업은 {active[0]['classroom']}이에요.")
+        st.caption(f"현재 입장 가능한 수업은 {active['classroom']}이에요.")
     else:
         st.caption("현재 입장 가능한 수업이 없어요.")
 
@@ -236,30 +340,37 @@ def teacher_page(db, password):
         state = " · 입장 가능" if lesson["accepting_entries"] else ""
         return f"{opened_at:%m월 %d일 %H:%M:%S} · {code}{state}"
 
-    st.subheader("순위")
+    st.subheader("수업 기록")
     code = st.selectbox(
         "순위를 볼 수업",
         list(by_code),
         format_func=round_label,
         key=results_key,
     )
-    show_results(db, code)
+    show_ranking(db, code, teacher=True)
 
     with st.expander("이 수업 기록 삭제"):
         st.warning(
-            "선택한 수업의 숫자판, 입장 기록, 제출 기록과 순위를 삭제합니다. "
-            "반별 학생 명단은 유지됩니다."
+            "선택한 수업의 숫자판, 시작 기록, 제출 기록과 순위를 삭제해요. "
+            "반별 학생 명단은 유지돼요."
         )
-        confirm_delete = st.checkbox(
+        confirmed = st.checkbox(
             "선택한 수업의 기록을 삭제할게요.",
             key=f"delete_confirm_{code}",
         )
+
         if st.button(
             "이 수업 영구 삭제",
-            disabled=not confirm_delete,
+            disabled=not confirmed,
             key=f"delete_round_{code}",
         ):
-            db.table("prime_rounds").delete().eq("code", code).execute()
+            (
+                db.table("prime_rounds")
+                .delete()
+                .eq("code", code)
+                .eq("classroom", classroom)
+                .execute()
+            )
             st.session_state.pop(results_key, None)
             st.session_state.teacher_notice = "선택한 수업 기록을 삭제했어요."
             st.rerun()
@@ -278,7 +389,7 @@ def show_outcome(result):
         st.error("숫자판에서 서로 다른 숫자 9개를 선택해 주세요.")
 
 
-def show_previous_attempt(db, code, name, joined_at):
+def show_previous_attempt(db, code, name, started_at):
     rows = (
         db.table("prime_attempts")
         .select("id,correct,submitted_at")
@@ -309,59 +420,92 @@ def show_previous_attempt(db, code, name, joined_at):
     submitted_at = attempt["submitted_at"]
     st.caption(
         f"제출 시각 {clock_text(submitted_at)} / "
-        f"풀이 시간 {elapsed_text(joined_at, submitted_at)}"
+        f"풀이 시간 {elapsed_text(started_at, submitted_at)}"
     )
     return True
 
 
 @st.fragment(run_every="1s")
-def show_timer(joined_at):
+def show_timer(started_at):
     now = datetime.now(timezone.utc).isoformat()
-    st.metric("입장 후 경과 시간", elapsed_text(joined_at, now))
+    st.metric("풀이 시간", elapsed_text(started_at, now))
 
 
 def student_page(db):
-    entry = st.session_state.get("entry")
+    login = st.session_state.get("prime_login")
+    started = st.session_state.get("prime_started")
 
-    if not entry:
-        with st.form("join"):
+    if not login:
+        with st.form("student_login"):
             name = normalize(st.text_input("이름", max_chars=40))
-            join = st.form_submit_button("입장", type="primary")
+            enter = st.form_submit_button("입장", type="primary", width="stretch")
 
-        if not join:
+        if not enter:
             return
         if not name:
             st.error("이름을 입력해 주세요.")
             return
 
-        result = db.rpc("prime_join_round", {"p_student": name}).execute().data
-        if result["status"] == "closed":
+        lesson = active_lesson(db)
+        if not lesson:
             st.info("선생님이 수업을 열면 입장할 수 있어요.")
             return
-        if result["status"] == "denied":
+        if name not in lesson["names"]:
             st.error("지금 열린 수업의 명단에 없는 이름이에요.")
             return
 
-        st.session_state.entry = {**result, "student": name}
+        st.session_state.prime_login = {
+            "code": lesson["code"],
+            "classroom": lesson["classroom"],
+            "name": name,
+        }
         st.rerun()
 
-    code = entry["code"]
-    name = entry["student"]
-    board = entry["board"]
-    joined_at = entry["joined_at"]
-    confirmation_key = f"confirm_{code}_{name}"
-
-    st.caption(f"{entry['classroom']} / {name}")
+    code = login["code"]
+    name = login["name"]
+    confirm_key = f"prime_confirm_{code}"
+    st.caption(f"{login['classroom']} / {name}")
 
     if st.button("입장 화면으로"):
-        for key in ("entry", "picks", confirmation_key):
+        for key in ("prime_login", "prime_started", "prime_picks", confirm_key):
             st.session_state.pop(key, None)
         st.rerun()
 
-    if show_previous_attempt(db, code, name, joined_at):
+    if not started:
+        st.markdown(
+            """
+            <div class="prime-ready">
+                <h2>준비됐나요?</h2>
+                <p>시작을 누르면 숫자판이 열리고 풀이 시간이 흐르기 시작해요.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.write("소수 9개를 모두 고르세요. 제출 기회는 한 번이에요.")
+
+        if st.button("시작", type="primary", width="stretch"):
+            current = active_lesson(db)
+            if not current or current["code"] != code:
+                st.warning("열린 수업이 바뀌었어요. 입장 화면으로 돌아가 다시 입장해 주세요.")
+                return
+
+            result = db.rpc(
+                "prime_join_round", {"p_student": name}
+            ).execute().data
+
+            if result["status"] != "joined" or result.get("code") != code:
+                st.warning("수업을 시작할 수 없어요. 입장 화면으로 돌아가 다시 입장해 주세요.")
+                return
+
+            st.session_state.prime_started = result
+            st.session_state.prime_picks = set()
+            st.rerun()
         return
 
-    lesson = (
+    board = started["board"]
+    started_at = started["joined_at"]
+
+    lesson_exists = (
         db.table("prime_rounds")
         .select("code")
         .eq("code", code)
@@ -369,43 +513,43 @@ def student_page(db):
         .execute()
         .data
     )
-    if not lesson:
-        st.info("이 수업 기록이 삭제됐어요. 입장 화면으로 돌아가 주세요.")
+    if not lesson_exists:
+        st.info("이 수업이 삭제됐어요. 입장 화면으로 돌아가 주세요.")
         return
 
-    show_timer(joined_at)
-    st.write("홀수 25개에서 소수 9개를 고르세요. 한 번만 제출할 수 있어요.")
+    if show_previous_attempt(db, code, name, started_at):
+        show_ranking(db, code)
+        return
 
-    if "picks" not in st.session_state:
-        st.session_state.picks = set()
-    picks = st.session_state.picks
+    show_timer(started_at)
+    st.subheader("소수 9개 찾기")
 
-    for start in range(0, len(board), 5):
-        for column, number in zip(st.columns(5), board[start:start + 5]):
-            selected = number in picks
-            if column.button(
-                str(number),
-                key=f"tile_{code}_{number}",
-                width="stretch",
-                type="primary" if selected else "secondary",
-                disabled=len(picks) >= 9 and not selected,
-            ):
-                if selected:
-                    picks.remove(number)
-                else:
-                    picks.add(number)
-                st.session_state.pop(confirmation_key, None)
-                st.rerun()
+    picks = st.session_state.prime_picks
+    st.progress(len(picks) / 9, text=f"선택한 숫자 {len(picks)} / 9")
 
-    st.write(f"선택한 숫자 {len(picks)} / 9")
-    confirmed = st.checkbox(
-        "선택한 9개를 최종 제출할게요.",
-        key=confirmation_key,
-    )
+    with st.container(key="prime_board"):
+        for start in range(0, len(board), 5):
+            for column, number in zip(st.columns(5), board[start:start + 5]):
+                selected = number in picks
+                if column.button(
+                    str(number),
+                    key=f"prime_tile_{code}_{number}",
+                    width="stretch",
+                    type="primary" if selected else "secondary",
+                    disabled=len(picks) >= 9 and not selected,
+                ):
+                    if selected:
+                        picks.remove(number)
+                    else:
+                        picks.add(number)
+                    st.session_state.pop(confirm_key, None)
+                    st.rerun()
 
+    confirmed = st.checkbox("선택한 9개를 최종 제출할게요.", key=confirm_key)
     if st.button(
         "최종 제출",
         type="primary",
+        width="stretch",
         disabled=len(picks) != 9 or not confirmed,
     ):
         result = db.rpc("prime_submit", {
@@ -421,7 +565,7 @@ def student_page(db):
 
 
 def main():
-    st.title("소수 찾기")
+    apply_style()
     mode = st.sidebar.radio("화면 선택", ["학생", "교사"])
 
     try:
@@ -458,7 +602,7 @@ def main():
             teacher_page(database, values["teacher_password"])
         else:
             student_page(database)
-    except (APIError, RequestError) as error:
+    except DATABASE_ERRORS as error:
         database_error(error)
 
 
